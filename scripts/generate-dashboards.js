@@ -52,10 +52,10 @@ const AZURE_RESOURCE_MAP = {
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 const log = {
-  info:    (msg) => console.log(`[INFO]  ${msg}`),
-  warn:    (msg) => console.warn(`[WARN]  ${msg}`),
-  error:   (msg) => console.error(`[ERROR] ${msg}`),
-  debug:   (msg) => VERBOSE && console.log(`[DEBUG] ${msg}`),
+  info: (msg) => console.log(`[INFO]  ${msg}`),
+  warn: (msg) => console.warn(`[WARN]  ${msg}`),
+  error: (msg) => console.error(`[ERROR] ${msg}`),
+  debug: (msg) => VERBOSE && console.log(`[DEBUG] ${msg}`),
   success: (msg) => console.log(`[OK]    ${msg}`),
 };
 
@@ -63,61 +63,29 @@ const log = {
 
 /**
  * Convert array of strings to KQL in(...) list.
- *
- * Template is read as a raw string, substituted, then JSON.parsed — so the
- * value we inject must be valid *inside* a JSON string literal.
- * A KQL string literal uses plain double-quotes: "value"
- * Inside a JSON string those quotes must be escaped as \"
- *
- * ["test", "test2"]  →  \"test\", \"test2\"
- *
- * The single backslash is enough because we're building a JS string that will
- * be embedded into a JSON string value; JSON.parse will then interpret \" as ".
+ * The template query strings are stored as JSON string values, so double-quotes
+ * must be escaped as \" — same as the rest of the KQL in the template.
+ * ["test", "test2"] → "\"test\", \"test2\""
  */
 function toKqlList(arr) {
   return arr.map((item) => `\\"${item}\\"`).join(", ");
 }
 
 /**
- * Generate a deterministic UID from env + project.
- *
- * Format: <env>-<16 hex chars>   e.g. "prd-a3f9c2d18e4b7f01"
- * - Deterministic: same env+project always produces the same uid
- * - Human-readable: env prefix makes it easy to spot in Grafana
- * - Collision-resistant: 16 hex chars = 64 bits of entropy
- * - Grafana-safe: only lowercase letters, digits, hyphens; max 40 chars
+ * Generate a deterministic short UID from env+project.
+ * Grafana uses this to identify dashboards — must be unique per project+env.
  */
 function generateUID(env, project) {
   const hash = crypto
     .createHash("sha256")
     .update(`${env}-${project}`)
     .digest("hex");
-  return `${env}-${hash.substring(0, 16)}`;
+  return hash.substring(0, 14);
 }
 
 /**
- * Re-number all panel ids sequentially (1-based) within a dashboard.
- *
- * Template panel ids are hardcoded. If panels are ever added/reordered,
- * duplicate ids would silently break Grafana links and alert references.
- * This ensures every generated dashboard always has clean, unique panel ids.
- */
-function reassignPanelIds(panels) {
-  let nextId = 1;
-  for (const panel of panels) {
-    panel.id = nextId++;
-    // Recurse into collapsed row children
-    if (Array.isArray(panel.panels) && panel.panels.length > 0) {
-      for (const child of panel.panels) {
-        child.id = nextId++;
-      }
-    }
-  }
-}
-
-/**
- * Validate required fields in config.
- * Returns { valid: bool, missing: string[] }
+ * Validate required fields in config
+ * Returns { valid: bool, missing: [] }
  */
 function validateConfig(config) {
   const missing = REQUIRED_FIELDS.filter((f) => {
@@ -131,26 +99,26 @@ function validateConfig(config) {
 }
 
 /**
- * Perform all placeholder replacements in template string.
+ * Perform all placeholder replacements in template string
  */
 function applyTemplate(templateStr, config, azureResource) {
   const projectUpper = config.project.toUpperCase();
-  const envUpper     = config.env.toUpperCase();
-  const apisKql      = toKqlList(config.apis);
+  const envUpper = config.env.toUpperCase();
+  const apisKql = toKqlList(config.apis);
   const operationsKql = toKqlList(config.operation);
-  const uid          = generateUID(config.env, config.project);
+  const uid = generateUID(config.env, config.project);
 
   const replacements = {
-    "{{project}}":             config.project,
-    "{{product}}":             config.product,
-    "{{binsize}}":             config.binsize,
-    "{{env}}":                 config.env,
-    "{{PROJECT_UPPER}}":       projectUpper,
-    "{{env_upper}}":           envUpper,
-    "{{APIS_KQL_LIST}}":       apisKql,
+    "{{project}}": config.project,
+    "{{product}}": config.product,
+    "{{binsize}}": config.binsize,
+    "{{env}}": config.env,
+    "{{PROJECT_UPPER}}": projectUpper,
+    "{{env_upper}}": envUpper,
+    "{{APIS_KQL_LIST}}": apisKql,
     "{{OPERATIONS_KQL_LIST}}": operationsKql,
-    "{{AZURE_RESOURCE}}":      azureResource,
-    "{{DASHBOARD_UID}}":       uid,
+    "{{AZURE_RESOURCE}}": azureResource,
+    "{{DASHBOARD_UID}}": uid,
   };
 
   let result = templateStr;
@@ -161,12 +129,10 @@ function applyTemplate(templateStr, config, azureResource) {
 }
 
 /**
- * Validate that the generated JSON is a valid Grafana dashboard structure.
- * Returns true if valid, false otherwise (errors are logged).
+ * Validate that the generated JSON is a valid Grafana dashboard structure
  */
 function validateDashboardSchema(dashboard, fileName) {
   const errors = [];
-
   if (!dashboard.panels || !Array.isArray(dashboard.panels))
     errors.push("Missing or invalid 'panels' array");
   if (!dashboard.title || typeof dashboard.title !== "string")
@@ -175,9 +141,6 @@ function validateDashboardSchema(dashboard, fileName) {
     errors.push("Missing 'schemaVersion'");
   if (!dashboard.templating?.list)
     errors.push("Missing 'templating.list'");
-  if (!dashboard.uid || typeof dashboard.uid !== "string")
-    errors.push("Missing or invalid 'uid'");
-
   if (errors.length > 0) {
     log.error(`Schema validation failed for ${fileName}:`);
     errors.forEach((e) => log.error(`  - ${e}`));
@@ -185,7 +148,7 @@ function validateDashboardSchema(dashboard, fileName) {
   }
 
   // Warn on any unreplaced placeholders
-  const jsonStr   = JSON.stringify(dashboard);
+  const jsonStr = JSON.stringify(dashboard);
   const remaining = jsonStr.match(/\{\{[A-Z_a-z]+\}\}/g);
   if (remaining) {
     const unique = [...new Set(remaining)];
@@ -200,7 +163,7 @@ function processConfig(configPath, templateStr, stats) {
   const fileName = path.basename(configPath);
   log.debug(`Processing: ${configPath}`);
 
-  // Read & parse config
+  // Read config
   let config;
   try {
     const raw = fs.readFileSync(configPath, "utf-8");
@@ -249,20 +212,17 @@ function processConfig(configPath, templateStr, stats) {
     return;
   }
 
-  // ── Grafana import safety ────────────────────────────────────────────────
-  // id: null → Grafana always creates/updates by uid, never by numeric id.
-  //            Prevents "Access denied" when importing across orgs/folders.
+  // ── FIX: Grafana "Access denied" on import ──────────────────────────────
+  // When importing, Grafana uses "id" to look up an existing dashboard.
+  // If a dashboard with that id belongs to another org/folder, it blocks import.
+  // Setting id: null tells Grafana to always create a new dashboard.
+  // uid stays intact so re-imports update the same dashboard instead of duplicating.
   dashboard.id = null;
-
-  // Reassign panel ids sequentially so they are always unique within the
-  // dashboard, regardless of what the template or future edits contain.
-  if (Array.isArray(dashboard.panels)) {
-    reassignPanelIds(dashboard.panels);
-  }
   // ────────────────────────────────────────────────────────────────────────
 
   // Schema validation
-  if (!validateDashboardSchema(dashboard, fileName)) {
+  const schemaOk = validateDashboardSchema(dashboard, fileName);
+  if (!schemaOk) {
     stats.failed++;
     return;
   }
@@ -271,14 +231,13 @@ function processConfig(configPath, templateStr, stats) {
   const outputPath = path.join(OUTPUT_DIR, config.env, `dashboard_${config.project}.json`);
 
   if (DRY_RUN) {
-    log.info(`[DRY-RUN] Would write : ${outputPath}`);
-    log.info(`  Title  : ${dashboard.title}`);
-    log.info(`  UID    : ${dashboard.uid}`);
-    log.info(`  id     : ${dashboard.id} (null = safe to import)`);
-    log.info(`  Panels : ${dashboard.panels.length}`);
-    log.info(`  APIs   : ${config.apis.join(", ")}`);
-    log.info(`  Ops    : ${config.operation.join(", ")}`);
-    stats.dryRun++;
+    log.info(`[DRY-RUN] Would write: ${outputPath}`);
+    log.info(`  Title : ${dashboard.title}`);
+    log.info(`  UID   : ${dashboard.uid}`);
+    log.info(`  id    : ${dashboard.id} (null = safe to import)`);
+    log.info(`  APIs  : ${config.apis.join(", ")}`);
+    log.info(`  Ops   : ${config.operation.join(", ")}`);
+    stats.generated++;
     return;
   }
 
@@ -305,7 +264,8 @@ function processEnv(env, templateStr, stats) {
     return;
   }
 
-  const allFiles = fs.readdirSync(envDir).filter((f) => f.endsWith(".json"));
+  // Build list of files to process
+  let allFiles = fs.readdirSync(envDir).filter((f) => f.endsWith(".json"));
 
   if (allFiles.length === 0) {
     log.warn(`No JSON config files found in ${envDir} — skipping`);
@@ -317,6 +277,7 @@ function processEnv(env, templateStr, stats) {
   if (TARGET_FILE === "all") {
     filesToProcess = allFiles;
   } else {
+    // Accept "project_a", "project_a.json", or "project_a,project_b"
     const requested = TARGET_FILE.split(",").map((f) =>
       f.trim().endsWith(".json") ? f.trim() : `${f.trim()}.json`
     );
@@ -342,21 +303,12 @@ function processEnv(env, templateStr, stats) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 function main() {
   log.info("=".repeat(60));
-  log.info("Grafana Dashboard Generator");
+  log.info(`Grafana Dashboard Generator`);
   log.info(`Target env  : ${TARGET_ENV}`);
   log.info(`Target file : ${TARGET_FILE}`);
   log.info(`Dry run     : ${DRY_RUN}`);
   log.info(`Template    : ${TEMPLATE_PATH}`);
   log.info("=".repeat(60));
-
-  // ── Validate env argument(s) before doing any work ───────────────────────
-  const envsToProcess = TARGET_ENV === "all" ? VALID_ENVS : [TARGET_ENV];
-  for (const env of envsToProcess) {
-    if (!VALID_ENVS.includes(env)) {
-      log.error(`Invalid env "${env}". Valid options: ${VALID_ENVS.join(", ")}`);
-      process.exit(1);
-    }
-  }
 
   // Load & validate template
   if (!fs.existsSync(TEMPLATE_PATH)) {
@@ -373,22 +325,24 @@ function main() {
     process.exit(1);
   }
 
-  const stats = { generated: 0, skipped: 0, failed: 0, dryRun: 0 };
+  const stats = { generated: 0, skipped: 0, failed: 0 };
+
+  const envsToProcess = TARGET_ENV === "all" ? VALID_ENVS : [TARGET_ENV];
 
   for (const env of envsToProcess) {
+    if (!VALID_ENVS.includes(env)) {
+      log.error(`Invalid env "${env}". Valid options: ${VALID_ENVS.join(", ")}`);
+      process.exit(1);
+    }
     processEnv(env, templateStr, stats);
   }
 
-  // ── Summary ───────────────────────────────────────────────────────────────
+  // Summary
   log.info("=".repeat(60));
-  log.info("Summary:");
-  if (DRY_RUN) {
-    log.info(`  Would generate : ${stats.dryRun}`);
-  } else {
-    log.info(`  Generated      : ${stats.generated}`);
-  }
-  log.info(`  Skipped        : ${stats.skipped}`);
-  log.info(`  Failed         : ${stats.failed}`);
+  log.info(`Summary:`);
+  log.info(`  Generated : ${stats.generated}`);
+  log.info(`  Skipped   : ${stats.skipped}`);
+  log.info(`  Failed    : ${stats.failed}`);
   log.info("=".repeat(60));
 
   if (stats.failed > 0) {
@@ -396,8 +350,7 @@ function main() {
     process.exit(1);
   }
 
-  const totalProcessed = DRY_RUN ? stats.dryRun : stats.generated;
-  if (totalProcessed === 0 && stats.skipped === 0) {
+  if (stats.generated === 0 && stats.skipped === 0) {
     log.error("No dashboards were generated. Check your configs directory.");
     process.exit(1);
   }
