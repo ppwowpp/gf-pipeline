@@ -1,0 +1,16 @@
+{
+    "project": "optimus",
+    "product": "product-prd-optimus",
+    "apis": [
+        "ebcc-api-gomo-pxx",
+        "ext-api-sap-px"
+    ],
+    "operation": [
+        "createPersoSim",
+        "0025-serialNumberExpirationDate",
+        "0145-doCreation",
+        "0170-createFreightOrder"
+    ],
+    "binsize": "5m",
+    "env": "prd"
+}

@@ -1,0 +1,24 @@
+{
+    "project": "myChannel",
+    "product": "product-prd-myChannel",
+    "apis": [
+        "ext-api-sales-bff-px",
+        "ext-api-sap-px"
+    ],
+    "operation": [
+        "queryProductStock",
+        "cancelShoppingCart",
+        "createQueryStockNonSerial",
+        "queryShoppingCart",
+        "reserveAddProductStock",
+        "reserveProductStock",
+        "reserveRemoveProductStock"
+    ],
+    "binsize": "5m",
+    "env": "prd"
+}
+
+
+
+
+
