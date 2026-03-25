@@ -1,0 +1,14 @@
+AzureDiagnostics
+| where $__timeFilter(TimeGenerated)
+| extend Client = case(
+    productId_s in ("{{product}}","{{project}}"), "{{project}}",
+    "other"
+)
+| where Client in ("{{project}}")
+| where apiId_s in ({{apis_list}})
+| where operationId_s in ({{operation_list}})
+| extend class = strcat(Client, " | ", apiId_s, " | ", operationId_s)
+| summarize TPS1S = count() by bin(TimeGenerated,1s), tostring(class)
+| summarize TPS = max(TPS1S) by bin(TimeGenerated,{{binsize}}), tostring(class)
+| order by TimeGenerated asc
+| render timechart

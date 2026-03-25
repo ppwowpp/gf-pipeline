@@ -1,0 +1,13 @@
+{
+    "project": "a",
+    "product": "product-prd-projecta",
+    "apis": [
+        "test",
+        "test2"
+    ],
+    "operation": [
+        "test_op"
+    ],
+    "binsize": "5m",
+    "env": "prod"
+}
