@@ -133,11 +133,13 @@ jobs:
               try { process.stdout.write(JSON.parse(require('fs').readFileSync('$f','utf8')).title || 'N/A'); }
               catch(e) { process.stdout.write('parse error'); }
             ")
-            UID=$(node -e "
+            
+            DASH_UID=$(node -e "
               try { process.stdout.write(JSON.parse(require('fs').readFileSync('$f','utf8')).uid || '-'); }
               catch(e) { process.stdout.write('-'); }
             ")
-            echo "  $f  |  uid: $UID  |  $TITLE"
+            
+            echo "  $f  |  uid: $DASH_UID  |  $TITLE"
           done
 
       # ── 7. Commit and push ────────────────────────────────────────────────────
