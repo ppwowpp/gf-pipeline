@@ -3,10 +3,13 @@
 /**
  * generate-dashboards.js
  * Generates Grafana dashboards from JSON configs + template
+ *
  * Usage:
  *   node scripts/generate-dashboards.js --env=prd
+ *   node scripts/generate-dashboards.js --env=prd --file=project_a
+ *   node scripts/generate-dashboards.js --env=prd --file=project_a,project_b
  *   node scripts/generate-dashboards.js --env=all
- *   node scripts/generate-dashboards.js --env=dev --dry-run
+ *   node scripts/generate-dashboards.js --env=all --dry-run
  */
 
 const fs = require("fs");
@@ -22,6 +25,9 @@ const args = Object.fromEntries(
 );
 
 const TARGET_ENV = args.env || "all";
+// --file=project_a  or  --file=project_a,project_b  (no .json extension needed)
+// "all" = process every file in the env dir (default)
+const TARGET_FILE = args.file || "all";
 const DRY_RUN = args["dry-run"] === true || args["dry-run"] === "true";
 const VERBOSE = args.verbose === true || args.verbose === "true";
 
@@ -66,7 +72,8 @@ function toKqlList(arr) {
 }
 
 /**
- * Generate a deterministic short UID from env+project
+ * Generate a deterministic short UID from env+project.
+ * Grafana uses this to identify dashboards — must be unique per project+env.
  */
 function generateUID(env, project) {
   const hash = crypto
@@ -80,7 +87,7 @@ function generateUID(env, project) {
  * Validate required fields in config
  * Returns { valid: bool, missing: [] }
  */
-function validateConfig(config, filePath) {
+function validateConfig(config) {
   const missing = REQUIRED_FIELDS.filter((f) => {
     const val = config[f];
     if (val === undefined || val === null) return true;
@@ -116,7 +123,6 @@ function applyTemplate(templateStr, config, azureResource) {
 
   let result = templateStr;
   for (const [placeholder, value] of Object.entries(replacements)) {
-    // Use split/join for global replace without regex escape issues
     result = result.split(placeholder).join(value);
   }
   return result;
@@ -125,7 +131,7 @@ function applyTemplate(templateStr, config, azureResource) {
 /**
  * Validate that the generated JSON is a valid Grafana dashboard structure
  */
-function validateDashboardSchema(dashboard, filePath) {
+function validateDashboardSchema(dashboard, fileName) {
   const errors = [];
   if (!dashboard.panels || !Array.isArray(dashboard.panels))
     errors.push("Missing or invalid 'panels' array");
@@ -136,17 +142,17 @@ function validateDashboardSchema(dashboard, filePath) {
   if (!dashboard.templating?.list)
     errors.push("Missing 'templating.list'");
   if (errors.length > 0) {
-    log.error(`Schema validation failed for ${filePath}:`);
+    log.error(`Schema validation failed for ${fileName}:`);
     errors.forEach((e) => log.error(`  - ${e}`));
     return false;
   }
 
-  // Check no unreplaced placeholders remain
+  // Warn on any unreplaced placeholders
   const jsonStr = JSON.stringify(dashboard);
   const remaining = jsonStr.match(/\{\{[A-Z_a-z]+\}\}/g);
   if (remaining) {
     const unique = [...new Set(remaining)];
-    log.warn(`Unreplaced placeholders in ${filePath}: ${unique.join(", ")}`);
+    log.warn(`Unreplaced placeholders in ${fileName}: ${unique.join(", ")}`);
   }
 
   return true;
@@ -169,14 +175,14 @@ function processConfig(configPath, templateStr, stats) {
   }
 
   // Validate required fields
-  const { valid, missing } = validateConfig(config, configPath);
+  const { valid, missing } = validateConfig(config);
   if (!valid) {
     log.warn(`Skipping ${fileName} — missing required fields: ${missing.join(", ")}`);
     stats.skipped++;
     return;
   }
 
-  // Validate env matches directory
+  // Validate env matches directory name
   const envFromDir = path.basename(path.dirname(configPath));
   if (config.env !== envFromDir) {
     log.warn(`Skipping ${fileName} — config.env "${config.env}" does not match directory "${envFromDir}"`);
@@ -206,6 +212,14 @@ function processConfig(configPath, templateStr, stats) {
     return;
   }
 
+  // ── FIX: Grafana "Access denied" on import ──────────────────────────────
+  // When importing, Grafana uses "id" to look up an existing dashboard.
+  // If a dashboard with that id belongs to another org/folder, it blocks import.
+  // Setting id: null tells Grafana to always create a new dashboard.
+  // uid stays intact so re-imports update the same dashboard instead of duplicating.
+  dashboard.id = null;
+  // ────────────────────────────────────────────────────────────────────────
+
   // Schema validation
   const schemaOk = validateDashboardSchema(dashboard, fileName);
   if (!schemaOk) {
@@ -218,10 +232,11 @@ function processConfig(configPath, templateStr, stats) {
 
   if (DRY_RUN) {
     log.info(`[DRY-RUN] Would write: ${outputPath}`);
-    log.info(`  Title: ${dashboard.title}`);
-    log.info(`  UID:   ${dashboard.uid}`);
-    log.info(`  APIs:  ${config.apis.join(", ")}`);
-    log.info(`  Ops:   ${config.operation.join(", ")}`);
+    log.info(`  Title : ${dashboard.title}`);
+    log.info(`  UID   : ${dashboard.uid}`);
+    log.info(`  id    : ${dashboard.id} (null = safe to import)`);
+    log.info(`  APIs  : ${config.apis.join(", ")}`);
+    log.info(`  Ops   : ${config.operation.join(", ")}`);
     stats.generated++;
     return;
   }
@@ -232,7 +247,7 @@ function processConfig(configPath, templateStr, stats) {
   // Write output
   try {
     fs.writeFileSync(outputPath, JSON.stringify(dashboard, null, 2), "utf-8");
-    log.success(`Generated: ${outputPath}`);
+    log.success(`Generated: ${outputPath}  (uid: ${dashboard.uid})`);
     stats.generated++;
   } catch (err) {
     log.error(`Failed to write ${outputPath}: ${err.message}`);
@@ -240,7 +255,7 @@ function processConfig(configPath, templateStr, stats) {
   }
 }
 
-// ─── Core: process all configs in an env directory ───────────────────────────
+// ─── Core: process configs in an env directory ───────────────────────────────
 function processEnv(env, templateStr, stats) {
   const envDir = path.join(CONFIGS_DIR, env);
 
@@ -249,16 +264,38 @@ function processEnv(env, templateStr, stats) {
     return;
   }
 
-  const files = fs.readdirSync(envDir).filter((f) => f.endsWith(".json"));
+  // Build list of files to process
+  let allFiles = fs.readdirSync(envDir).filter((f) => f.endsWith(".json"));
 
-  if (files.length === 0) {
+  if (allFiles.length === 0) {
     log.warn(`No JSON config files found in ${envDir} — skipping`);
     return;
   }
 
-  log.info(`Processing env: ${env} (${files.length} file(s))`);
+  // ── Filter by --file= if specified ───────────────────────────────────────
+  let filesToProcess;
+  if (TARGET_FILE === "all") {
+    filesToProcess = allFiles;
+  } else {
+    // Accept "project_a", "project_a.json", or "project_a,project_b"
+    const requested = TARGET_FILE.split(",").map((f) =>
+      f.trim().endsWith(".json") ? f.trim() : `${f.trim()}.json`
+    );
+    filesToProcess = requested.filter((f) => {
+      if (allFiles.includes(f)) return true;
+      log.warn(`File not found in configs/${env}/: ${f} — skipping`);
+      return false;
+    });
+  }
 
-  for (const file of files) {
+  if (filesToProcess.length === 0) {
+    log.warn(`No matching files to process in ${envDir}`);
+    return;
+  }
+
+  log.info(`Processing env: ${env} (${filesToProcess.length}/${allFiles.length} file(s))`);
+
+  for (const file of filesToProcess) {
     processConfig(path.join(envDir, file), templateStr, stats);
   }
 }
@@ -267,12 +304,13 @@ function processEnv(env, templateStr, stats) {
 function main() {
   log.info("=".repeat(60));
   log.info(`Grafana Dashboard Generator`);
-  log.info(`Target env : ${TARGET_ENV}`);
-  log.info(`Dry run    : ${DRY_RUN}`);
-  log.info(`Template   : ${TEMPLATE_PATH}`);
+  log.info(`Target env  : ${TARGET_ENV}`);
+  log.info(`Target file : ${TARGET_FILE}`);
+  log.info(`Dry run     : ${DRY_RUN}`);
+  log.info(`Template    : ${TEMPLATE_PATH}`);
   log.info("=".repeat(60));
 
-  // Load template
+  // Load & validate template
   if (!fs.existsSync(TEMPLATE_PATH)) {
     log.error(`Template not found: ${TEMPLATE_PATH}`);
     process.exit(1);
@@ -281,8 +319,7 @@ function main() {
   let templateStr;
   try {
     templateStr = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    // Validate template is parseable JSON
-    JSON.parse(templateStr);
+    JSON.parse(templateStr); // pre-validate JSON
   } catch (err) {
     log.error(`Invalid template JSON: ${err.message}`);
     process.exit(1);
@@ -290,8 +327,7 @@ function main() {
 
   const stats = { generated: 0, skipped: 0, failed: 0 };
 
-  const envsToProcess =
-    TARGET_ENV === "all" ? VALID_ENVS : [TARGET_ENV];
+  const envsToProcess = TARGET_ENV === "all" ? VALID_ENVS : [TARGET_ENV];
 
   for (const env of envsToProcess) {
     if (!VALID_ENVS.includes(env)) {

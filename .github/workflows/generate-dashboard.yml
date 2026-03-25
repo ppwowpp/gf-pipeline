@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       env:
-        description: "Target environment"
+        description: "Environment"
         required: true
         default: "all"
         type: choice
@@ -15,8 +15,17 @@ on:
           - sit
           - uat
           - prd
+      file:
+        description: |
+          Config file to generate (without .json)
+          - Leave blank = all files in selected env
+          - Single file: project_a
+          - Multiple files: project_a,project_b
+        required: false
+        default: ""
+        type: string
       dry_run:
-        description: "Dry run (no files written)"
+        description: "Dry run (preview only, no files written)"
         required: false
         default: false
         type: boolean
@@ -46,49 +55,53 @@ jobs:
         with:
           node-version: "20"
 
-      # ── 3. Determine target env ───────────────────────────────────────────────
-      - name: Determine target environment
-        id: target
+      # ── 3. Resolve run parameters ─────────────────────────────────────────────
+      - name: Resolve run parameters
+        id: params
         run: |
-          # workflow_dispatch: use input; push: use "all"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "env=${{ github.event.inputs.env }}" >> $GITHUB_OUTPUT
-            echo "dry_run=${{ github.event.inputs.dry_run }}" >> $GITHUB_OUTPUT
+            ENV="${{ github.event.inputs.env }}"
+            FILE="${{ github.event.inputs.file }}"
+            DRY="${{ github.event.inputs.dry_run }}"
           else
-            echo "env=all" >> $GITHUB_OUTPUT
-            echo "dry_run=false" >> $GITHUB_OUTPUT
+            # push trigger → regenerate all
+            ENV="all"
+            FILE=""
+            DRY="false"
           fi
+
+          # Normalise: blank/whitespace → "all"
+          FILE=$(echo "$FILE" | tr -d ' ')
+          [ -z "$FILE" ] && FILE="all"
+
+          echo "env=$ENV"   >> $GITHUB_OUTPUT
+          echo "file=$FILE" >> $GITHUB_OUTPUT
+          echo "dry=$DRY"   >> $GITHUB_OUTPUT
+
+          echo "▶ env  = $ENV"
+          echo "▶ file = $FILE"
+          echo "▶ dry  = $DRY"
 
       # ── 4. Validate configs directory ────────────────────────────────────────
       - name: Validate configs directory
         run: |
-          TARGET="${{ steps.target.outputs.env }}"
+          TARGET_ENV="${{ steps.params.outputs.env }}"
           ENVS=("dev" "sit" "uat" "prd")
-
-          if [ "$TARGET" = "all" ]; then
-            CHECK_ENVS=("${ENVS[@]}")
-          else
-            CHECK_ENVS=("$TARGET")
-          fi
+          [ "$TARGET_ENV" = "all" ] && CHECK=("${ENVS[@]}") || CHECK=("$TARGET_ENV")
 
           HAS_ANY=false
-          for ENV in "${CHECK_ENVS[@]}"; do
-            DIR="configs/$ENV"
-            if [ -d "$DIR" ]; then
-              COUNT=$(find "$DIR" -maxdepth 1 -name "*.json" | wc -l)
-              if [ "$COUNT" -gt 0 ]; then
-                echo "✅ configs/$ENV — $COUNT file(s)"
-                HAS_ANY=true
-              else
-                echo "⚠️  configs/$ENV — directory exists but no JSON files"
-              fi
+          for E in "${CHECK[@]}"; do
+            COUNT=$(find "configs/$E" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "✅ configs/$E — $COUNT file(s)"
+              HAS_ANY=true
             else
-              echo "⚠️  configs/$ENV — directory not found"
+              echo "⚠️  configs/$E — no JSON files found"
             fi
           done
 
           if [ "$HAS_ANY" = "false" ]; then
-            echo "❌ No config files found for target env: $TARGET"
+            echo "❌ No config files found for env: $TARGET_ENV"
             exit 1
           fi
 
@@ -100,49 +113,47 @@ jobs:
           AZURE_RESOURCE_UAT: ${{ secrets.AZURE_RESOURCE_UAT }}
           AZURE_RESOURCE_PRD: ${{ secrets.AZURE_RESOURCE_PRD }}
         run: |
-          TARGET="${{ steps.target.outputs.env }}"
-          DRY="${{ steps.target.outputs.dry_run }}"
+          ENV="${{ steps.params.outputs.env }}"
+          FILE="${{ steps.params.outputs.file }}"
+          DRY="${{ steps.params.outputs.dry }}"
 
-          ARGS="--env=${TARGET}"
-          if [ "$DRY" = "true" ]; then
-            ARGS="$ARGS --dry-run"
-            echo "🔍 Running in DRY-RUN mode — no files will be written"
-          fi
+          ARGS="--env=${ENV} --file=${FILE}"
+          [ "$DRY" = "true" ] && ARGS="$ARGS --dry-run"
 
           echo "Running: node scripts/generate-dashboards.js $ARGS"
           node scripts/generate-dashboards.js $ARGS
 
-      # ── 6. Show generated files ───────────────────────────────────────────────
+      # ── 6. List generated files ───────────────────────────────────────────────
       - name: List generated outputs
-        if: ${{ steps.target.outputs.dry_run != 'true' }}
+        if: ${{ steps.params.outputs.dry != 'true' }}
         run: |
           echo "=== Generated Dashboard Files ==="
           find output/ -name "*.json" -type f | sort | while read f; do
-            SIZE=$(wc -c < "$f")
             TITLE=$(node -e "
-              try {
-                const d = JSON.parse(require('fs').readFileSync('$f','utf8'));
-                process.stdout.write(d.title || 'N/A');
-              } catch(e) { process.stdout.write('parse error'); }
+              try { process.stdout.write(JSON.parse(require('fs').readFileSync('$f','utf8')).title || 'N/A'); }
+              catch(e) { process.stdout.write('parse error'); }
             ")
-            echo "  $f ($SIZE bytes) — $TITLE"
+            UID=$(node -e "
+              try { process.stdout.write(JSON.parse(require('fs').readFileSync('$f','utf8')).uid || '-'); }
+              catch(e) { process.stdout.write('-'); }
+            ")
+            echo "  $f  |  uid: $UID  |  $TITLE"
           done
 
-      # ── 7. Commit and push outputs ────────────────────────────────────────────
+      # ── 7. Commit and push ────────────────────────────────────────────────────
       - name: Commit and push generated dashboards
-        if: ${{ steps.target.outputs.dry_run != 'true' }}
+        if: ${{ steps.params.outputs.dry != 'true' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add output/
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
             CHANGED=$(git diff --cached --name-only | wc -l)
-            ENV_LABEL="${{ steps.target.outputs.env }}"
-            git commit -m "chore: auto-generate dashboards [env=$ENV_LABEL] ($CHANGED file(s)) [skip ci]"
+            FILE_LABEL="${{ steps.params.outputs.file }}"
+            git commit -m "chore: generate dashboards [env=${{ steps.params.outputs.env }}] [file=${FILE_LABEL}] (${CHANGED} file(s)) [skip ci]"
             git push
-            echo "✅ Pushed $CHANGED updated dashboard(s)"
+            echo "✅ Pushed ${CHANGED} dashboard(s)"
           fi
