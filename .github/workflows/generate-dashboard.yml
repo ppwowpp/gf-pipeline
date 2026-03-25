@@ -1,0 +1,148 @@
+# .github/workflows/generate-dashboard.yml
+name: Generate Grafana Dashboards
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - dev
+          - sit
+          - uat
+          - prd
+      dry_run:
+        description: "Dry run (no files written)"
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    paths:
+      - "configs/**/*.json"
+      - "templates/template_dashboard.json"
+
+permissions:
+  contents: write
+
+jobs:
+  generate-dashboards:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Setup Node.js ─────────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # ── 3. Determine target env ───────────────────────────────────────────────
+      - name: Determine target environment
+        id: target
+        run: |
+          # workflow_dispatch: use input; push: use "all"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "env=${{ github.event.inputs.env }}" >> $GITHUB_OUTPUT
+            echo "dry_run=${{ github.event.inputs.dry_run }}" >> $GITHUB_OUTPUT
+          else
+            echo "env=all" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 4. Validate configs directory ────────────────────────────────────────
+      - name: Validate configs directory
+        run: |
+          TARGET="${{ steps.target.outputs.env }}"
+          ENVS=("dev" "sit" "uat" "prd")
+
+          if [ "$TARGET" = "all" ]; then
+            CHECK_ENVS=("${ENVS[@]}")
+          else
+            CHECK_ENVS=("$TARGET")
+          fi
+
+          HAS_ANY=false
+          for ENV in "${CHECK_ENVS[@]}"; do
+            DIR="configs/$ENV"
+            if [ -d "$DIR" ]; then
+              COUNT=$(find "$DIR" -maxdepth 1 -name "*.json" | wc -l)
+              if [ "$COUNT" -gt 0 ]; then
+                echo "✅ configs/$ENV — $COUNT file(s)"
+                HAS_ANY=true
+              else
+                echo "⚠️  configs/$ENV — directory exists but no JSON files"
+              fi
+            else
+              echo "⚠️  configs/$ENV — directory not found"
+            fi
+          done
+
+          if [ "$HAS_ANY" = "false" ]; then
+            echo "❌ No config files found for target env: $TARGET"
+            exit 1
+          fi
+
+      # ── 5. Generate dashboards ────────────────────────────────────────────────
+      - name: Generate dashboards
+        env:
+          AZURE_RESOURCE_DEV: ${{ secrets.AZURE_RESOURCE_DEV }}
+          AZURE_RESOURCE_SIT: ${{ secrets.AZURE_RESOURCE_SIT }}
+          AZURE_RESOURCE_UAT: ${{ secrets.AZURE_RESOURCE_UAT }}
+          AZURE_RESOURCE_PRD: ${{ secrets.AZURE_RESOURCE_PRD }}
+        run: |
+          TARGET="${{ steps.target.outputs.env }}"
+          DRY="${{ steps.target.outputs.dry_run }}"
+
+          ARGS="--env=${TARGET}"
+          if [ "$DRY" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+            echo "🔍 Running in DRY-RUN mode — no files will be written"
+          fi
+
+          echo "Running: node scripts/generate-dashboards.js $ARGS"
+          node scripts/generate-dashboards.js $ARGS
+
+      # ── 6. Show generated files ───────────────────────────────────────────────
+      - name: List generated outputs
+        if: ${{ steps.target.outputs.dry_run != 'true' }}
+        run: |
+          echo "=== Generated Dashboard Files ==="
+          find output/ -name "*.json" -type f | sort | while read f; do
+            SIZE=$(wc -c < "$f")
+            TITLE=$(node -e "
+              try {
+                const d = JSON.parse(require('fs').readFileSync('$f','utf8'));
+                process.stdout.write(d.title || 'N/A');
+              } catch(e) { process.stdout.write('parse error'); }
+            ")
+            echo "  $f ($SIZE bytes) — $TITLE"
+          done
+
+      # ── 7. Commit and push outputs ────────────────────────────────────────────
+      - name: Commit and push generated dashboards
+        if: ${{ steps.target.outputs.dry_run != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add output/
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            CHANGED=$(git diff --cached --name-only | wc -l)
+            ENV_LABEL="${{ steps.target.outputs.env }}"
+            git commit -m "chore: auto-generate dashboards [env=$ENV_LABEL] ($CHANGED file(s)) [skip ci]"
+            git push
+            echo "✅ Pushed $CHANGED updated dashboard(s)"
+          fi

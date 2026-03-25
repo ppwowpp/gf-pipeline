@@ -1,0 +1,17 @@
+{
+    "project": "DT",
+    "product": "product-prd-dt",
+    "apis": [
+        "ext-api-sales-bff-px",
+        "ext-api-sap-px"
+    ],
+    "operation": [
+        "cancelShoppingCart", 
+        "reserveProductStock", 
+        "0186-serialNumberValidation", 
+        "0337-createQueryStockNonSerial"
+    ],
+    "binsize": "5m",
+    "env": "prd"
+}
+
